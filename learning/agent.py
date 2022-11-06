@@ -3,6 +3,11 @@ from abc import ABCMeta, abstractmethod
 import numpy as np
 from coder.tile import PendulumTileCoder
 from learning.utils import *
+from learning.models import Actor, Critic
+import torch
+
+ACTOR_LR = 0.0001
+CRITIC_LR = 0.0002
 
 class BaseAgent:
     """
@@ -60,7 +65,7 @@ class BaseAgent:
             The response (or answer) to the message.
         """
 
-class ActorCriticSoftmaxAgent(BaseAgent): 
+class ActorCriticAgent(BaseAgent): 
     def __init__(self):
         self.rand_generator = None
 
@@ -85,7 +90,7 @@ class ActorCriticSoftmaxAgent(BaseAgent):
         self.prev_tiles = None
         self.last_action = None
     
-    def agent_init(self, agent_info={}):
+    def init(self, agent_info={}):
         """Setup for the agent called when the experiment first starts.
 
         Set parameters needed to setup the semi-gradient TD(0) state aggregation agent.
@@ -99,6 +104,8 @@ class ActorCriticSoftmaxAgent(BaseAgent):
             "critic_step_size": float,
             "avg_reward_step_size": float,
             "num_actions": int,
+            "action_high": float,
+            "action_low": float,
             "seed": int
         }
         """
@@ -107,30 +114,34 @@ class ActorCriticSoftmaxAgent(BaseAgent):
         self.rand_generator = np.random.RandomState(agent_info.get("seed")) 
 
         # initialize the tile coder
-        iht_size = agent_info.get("iht_size")
-        num_tilings = agent_info.get("num_tilings")
-        num_tiles = agent_info.get("num_tiles")
-        self.tc = PendulumTileCoder(iht_size=iht_size, num_tilings=num_tilings, num_tiles=num_tiles)
+        self.iht_size = agent_info.get("iht_size")
+        self.num_tilings = agent_info.get("num_tilings")
+        self.num_tiles = agent_info.get("num_tiles")
+        self.tc = PendulumTileCoder(iht_size=self.iht_size, num_tilings=self.num_tilings, num_tiles=self.num_tiles)
 
-        # set step-size accordingly (we normally divide actor and critic step-size by num. tilings (p.217-218 of textbook))
-        self.actor_step_size = agent_info.get("actor_step_size")/num_tilings
-        self.critic_step_size = agent_info.get("critic_step_size")/num_tilings
+        # set step-size accordingly
+        self.actor_step_size = agent_info.get("actor_step_size")/self.num_tilings
+        self.critic_step_size = agent_info.get("critic_step_size")/self.num_tilings
         self.avg_reward_step_size = agent_info.get("avg_reward_step_size")
 
         # get number of actions
         self.actions = list(range(agent_info.get("num_actions")))
+        self.action_high = agent_info.get("action_high")
+        self.action_low = agent_info.get("action_low")
 
         # Set initial values of average reward, actor weights, and critic weights
+        self.actor = Actor(agent_info.get("num_actions"), self.num_tiles, self.action_high, self.action_low)
+        self.critic = Critic(self.num_tiles)
+        self.actor_optim = torch.optim.Adam(self.actor.parameters(), lr=ACTOR_LR)
+        self.critic_optim = torch.optim.Adam(self.critic.parameters(), lr=CRITIC_LR)
         self.avg_reward = 0.0
-        self.actor_w = np.zeros((len(self.actions), iht_size))
-        self.critic_w = np.zeros(iht_size)
 
         # Saved values
         self.softmax_prob = None
         self.prev_tiles = None
         self.last_action = None
     
-    def agent_policy(self, active_tiles):
+    def act(self, active_tiles):
         """ policy of the agent
         Args:
             active_tiles (Numpy array): active tiles returned by tile coder
@@ -138,12 +149,10 @@ class ActorCriticSoftmaxAgent(BaseAgent):
         Returns:
             The action selected according to the policy
         """
-        softmax_prob = compute_softmax_prob(self.actor_w, active_tiles)
-        chosen_action = self.rand_generator.choice(self.actions, p=softmax_prob)
-        self.softmax_prob = softmax_prob
-        return chosen_action
+        tensor_active_tiles = torch.tensor(active_tiles, dtype=torch.float32)
+        return self.actor.sample(tensor_active_tiles)
 
-    def agent_start(self, state):
+    def start(self, state):
         """The first method called when the experiment starts, called after
         the environment starts.
         Args:
@@ -151,14 +160,14 @@ class ActorCriticSoftmaxAgent(BaseAgent):
         Returns:
             The first action the agent takes.
         """
-        angle, ang_vel = state
-        active_tiles = self.tc.get_tiles(angle, ang_vel)
-        current_action = self.agent_policy(active_tiles)
+        x, y, ang_vel = state
+        active_tiles = self.tc.get_tiles(x, y, ang_vel)
+        current_action = self.act(active_tiles)
         self.last_action = current_action
         self.prev_tiles = np.copy(active_tiles)
         return self.last_action
 
-    def agent_step(self, reward, state):
+    def step(self, reward, state):
         """A step taken by the agent.
         Args:
             reward (float): the reward received for taking the last action taken
@@ -168,22 +177,45 @@ class ActorCriticSoftmaxAgent(BaseAgent):
         Returns:
             The action the agent is taking.
         """
-        angle, ang_vel = state
-        active_tiles = self.tc.get_tiles(angle, ang_vel)
-        delta = reward - self.avg_reward + self.critic_w[active_tiles].sum() - self.critic_w[self.prev_tiles].sum()
+        x, y, ang_vel = state
+        active_tiles = self.tc.get_tiles(x, y, ang_vel)
+
+        # Calculate the state value
+        tensor_prev_tiles = torch.tensor(self.prev_tiles, dtype=torch.float32)
+        tensor_active_tiles = torch.tensor(active_tiles, dtype=torch.float32)
+        previous_state_value = self.critic(tensor_prev_tiles)
+        current_state_value = self.critic(tensor_active_tiles)
+
+        # Convert value to tensor
+        tensor_reward = torch.tensor(reward, dtype=torch.float32)
+
+        # Calculate the TD error
+        delta = torch.tensor(reward, dtype=torch.float32) - torch.tensor(self.avg_reward, dtype=torch.float32) + \
+                torch.sum(current_state_value, dim=1) - torch.sum(previous_state_value, dim=1)
+
+        # Update average reward
         self.avg_reward += self.avg_reward_step_size * delta
-        self.critic_w[self.prev_tiles] += self.critic_step_size * delta
+
+        # Update critic weights
+        loss = torch.sum(delta * self.critic_step_size, dim=1)
+        self.critic_optim.zero_grad()
+        loss.backward()
+        self.critic_optim.step()
+
+        # Update actor weights
         for a in self.actions:
             if a == self.last_action:
                 self.actor_w[a][self.prev_tiles] += self.actor_step_size * delta * (1 - self.softmax_prob[a])
             else:
                 self.actor_w[a][self.prev_tiles] += self.actor_step_size * delta * (0 - self.softmax_prob[a])
-        current_action = self.agent_policy(active_tiles)
+
+        # Update action
+        current_action = self.actor(active_tiles)
         self.prev_tiles = active_tiles
         self.last_action = current_action
         return self.last_action
 
 
-    def agent_message(self, message):
+    def message(self, message):
         if message == 'get avg reward':
             return self.avg_reward

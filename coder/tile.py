@@ -1,10 +1,12 @@
 import coder.tiles3 as tc
 import numpy as np
         
-ANGLE_MIN = -np.pi
-ANGLE_MAX = np.pi
-ANG_VEL_MIN = -2 * np.pi
-ANG_VEL_MAX = 2 * np.pi
+X_MIN = -1
+X_MAX = 1
+Y_MIN = -1
+Y_MAX = 1
+ANG_VEL_MIN = -8
+ANG_VEL_MAX = 8
 
 class PendulumTileCoder:
     def __init__(self, iht_size=4096, num_tilings=32, num_tiles=8):
@@ -24,7 +26,7 @@ class PendulumTileCoder:
         self.num_tiles = num_tiles 
         self.iht = tc.IHT(iht_size)
     
-    def get_tiles(self, angle, ang_vel):
+    def get_tiles(self, x, y, ang_vel):
         """
         Takes in an angle and angular velocity from the pendulum environment
         and returns a numpy array of active tiles.
@@ -40,11 +42,12 @@ class PendulumTileCoder:
         
         ### Use the ranges above and scale the angle and angular velocity between [0, 1]
         # then multiply by the number of tiles so they are scaled between [0, self.num_tiles]
-        angle_scaled = angle*self.num_tiles / (ANGLE_MAX - ANGLE_MIN)
+        x_scaled = x*self.num_tiles / (X_MAX - X_MIN)
+        y_scaled = y*self.num_tiles / (Y_MAX - Y_MIN)
         ang_vel_scaled = ang_vel*self.num_tiles / (ANG_VEL_MAX - ANG_VEL_MIN)
         
         # Get tiles by calling tc.tileswrap method
         # wrapwidths specify which dimension to wrap over and its wrapwidth
-        tiles = tc.tileswrap(self.iht, self.num_tilings, [angle_scaled, ang_vel_scaled], wrapwidths=[self.num_tiles, False])
+        tiles = tc.tileswrap(self.iht, self.num_tilings, [x_scaled, y_scaled, ang_vel_scaled], wrapwidths=[self.num_tiles, False])
                     
         return np.array(tiles)
