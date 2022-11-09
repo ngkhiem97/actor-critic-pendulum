@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import numpy as np
 
 EPSILON = 1e-6
 
@@ -11,7 +12,7 @@ def weights_init_(m):
 
 # Actor Network
 class Actor(torch.nn.Module):
-    def __init__(self, num_tiles, action_size, action_high, action_low):
+    def __init__(self, num_tiles, action_size, action_high:np.array, action_low:np.array):
         super(Actor, self).__init__()
         # input layer
         self.fc1 = nn.Linear(num_tiles, 64)
@@ -21,54 +22,44 @@ class Actor(torch.nn.Module):
         self.fc3 = nn.Linear(128, 256)
 
         # output layer
-        self.mean = nn.Linear(256, action_size)
-        self.log_std = nn.Linear(256, action_size)
+        self.fc_mean = nn.Linear(256, action_size)
+        self.fc_std = nn.Linear(256, action_size)
+        self.mean = nn.Tanh()
+        self.std = nn.Softplus()
 
         # initialize weights
         self.apply(weights_init_)
 
-        # define scale and bias
-        self.action_scale = torch.FloatTensor((action_high - action_low) / 2.)
-        self.action_bias = torch.FloatTensor((action_high + action_low) / 2.)
+        # set action range
+        self.action_high = action_high
+        self.action_low = action_low
 
     def forward(self, active_tiles:torch.Tensor):
-        x = active_tiles.view(active_tiles.size(0), -1)
+        x = active_tiles
         x = torch.relu(self.fc1(x))
         x = torch.relu(self.fc2(x))
         x = torch.relu(self.fc3(x))
-        mean = self.mean(x)
-        log_std = self.log_std(x)
-        return mean, log_std
+        mean = self.mean(self.fc_mean(x)) * self.action_high
+        std = self.std(self.fc_std(x)) + EPSILON
+        return mean, std
 
     def sample(self, active_tiles:torch.Tensor):
-        mean, log_std = self.forward(active_tiles)
-        std = torch.exp(log_std)
+        mean, std = self.forward(active_tiles)
         normal = torch.distributions.Normal(mean, std)
-        x_t = normal.rsample()
-        y_t = torch.tanh(x_t)
-        action = y_t * self.action_scale + self.action_bias
-        log_prob = normal.log_prob(x_t)
-        log_prob -= torch.log(1 - y_t.pow(2) + EPSILON)
-        log_prob = log_prob.sum(1, keepdim=True)
-        return action, log_prob
-
-    def to(self, device):
-        self.action_scale = self.action_scale.to(device)
-        self.action_bias = self.action_bias.to(device)
-        return super(Actor, self).to(device)
+        action = normal.sample()
+        return np.clip(action.item(), self.action_low, self.action_high)
 
 # Critic Network
 class Critic(torch.nn.Module):
-    def __init__(self, num_tiles, action_size):
+    def __init__(self, num_tiles):
         super(Critic, self).__init__()
         self.fc1 = torch.nn.Linear(num_tiles, 64)
         self.fc2 = torch.nn.Linear(64, 128)
         self.fc3 = torch.nn.Linear(128, 256)
         self.fc4 = torch.nn.Linear(256, 1)
 
-    def forward(self, active_tiles:torch.Tensor, action):
-        active_tiles = active_tiles.view(active_tiles.size(0), -1)
-        x = torch.cat((active_tiles, action), dim=1)
+    def forward(self, active_tiles:torch.Tensor):
+        x = active_tiles
         x = torch.relu(self.fc1(x))
         x = torch.relu(self.fc2(x))
         x = torch.relu(self.fc3(x))
